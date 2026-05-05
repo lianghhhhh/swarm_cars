@@ -14,7 +14,7 @@ ANGLE_SCALE      = math.pi / 3   # 60 degrees -> full stop linearly
 
 
 class SwarmControlNode(Node):
-    def __init__(self, num_agents=1):
+    def __init__(self, num_agents=11):
         super().__init__('swarm_control_node')
         self.num_agents = num_agents
         
@@ -23,7 +23,7 @@ class SwarmControlNode(Node):
         self.rvo_sim = rvo2.PyRVOSimulator(0.05, 5.0, 5, 2.0, 2.0, 0.5, 1.2)
         
         self.agent_rvo_ids = []
-        self.goals = [(10.0, 10.0)] * num_agents  # Example: all agents have the same goal at (10,10)
+        self.goals = [(10.0, 10.0)] * num_agents 
         
         # 2. Setup ROS 2 Publishers and Subscribers for each agent
         self.publishers_ = []
@@ -35,12 +35,12 @@ class SwarmControlNode(Node):
             agent_id = self.rvo_sim.addAgent((0.0, 0.0))
             self.agent_rvo_ids.append(agent_id)
             
-            # Create Cmd_vel Publisher: e.g., /car_1/cmd_vel
-            pub = self.create_publisher(Twist, f'/car_{i+1}/cmd_vel', 10)
+            # Create Cmd_vel Publisher: e.g., /car_0/cmd_vel
+            pub = self.create_publisher(Twist, f'/car_{i}/cmd_vel', 10)
             self.publishers_.append(pub)
             
-            # Create Odom Subscriber: e.g., /car_1/odom
-            sub = self.create_subscription(Odometry, f'/car_{i+1}/odom', 
+            # Create Odom Subscriber: e.g., /car_0/odom
+            sub = self.create_subscription(Odometry, f'/car_{i}/odom', 
                                            lambda msg, idx=i: self.odom_callback(msg, idx), 10)
             self.subscribers_.append(sub)
 
@@ -113,7 +113,7 @@ class SwarmControlNode(Node):
 
             if dist_to_goal < GOAL_THRESHOLD:
                 self.publishers_[i].publish(twist_msg)  # zero twist = stop
-                self.get_logger().info(f'Agent {i+1} reached goal!')
+                self.get_logger().info(f'Agent {i} reached goal!')
                 continue
 
             safe_velocity = self.rvo_sim.getAgentVelocity(self.agent_rvo_ids[i])
