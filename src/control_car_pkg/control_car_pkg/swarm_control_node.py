@@ -1,7 +1,9 @@
 import math
 import rvo2
+import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
+from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import Twist
 
 GOAL_THRESHOLD   = 0.3
@@ -24,11 +26,14 @@ class SwarmControlNode(Node):
         
         self.agent_rvo_ids = []
         self.goals = [(10.0, 10.0)] * num_agents 
+        self.has_calculated_goals = False
         
         # 2. Setup ROS 2 Publishers and Subscribers for each agent
         self.publishers_ = []
-        self.subscribers_ = []
+        self.odom_subscribers_ = []
+        self.tf_subscribers_ = []
         self.current_poses = {} # Store latest (x,y) from odometry
+        self.initial_poses = {} # Store initial (x,y) for each agent to set in RVO2
         
         for i in range(self.num_agents):
             # Add agent to ORCA sim (initially at 0,0)
@@ -42,7 +47,12 @@ class SwarmControlNode(Node):
             # Create Odom Subscriber: e.g., /car_0/odom
             sub = self.create_subscription(Odometry, f'/car_{i}/odom', 
                                            lambda msg, idx=i: self.odom_callback(msg, idx), 10)
-            self.subscribers_.append(sub)
+            self.odom_subscribers_.append(sub)
+
+            # Create TF Subscriber: e.g., /car_0/tf
+            tf_sub = self.create_subscription(TFMessage, f'/car_{i}/tf', 
+                                              lambda msg, idx=i: self.tf_callback(msg, idx), 10)
+            self.tf_subscribers_.append(tf_sub)
 
         # 3. Control Loop (runs at 20Hz)
         self.timer = self.create_timer(0.05, self.control_loop)
@@ -65,6 +75,46 @@ class SwarmControlNode(Node):
         # Store x, y, and yaw
         self.current_poses[agent_index] = (x, y, yaw)
 
+    def tf_callback(self, msg, agent_index):
+        # Extract position from TF (if needed for RVO2 initialization)
+        if agent_index not in self.initial_poses and msg.transforms:
+            transform = msg.transforms[0].transform
+            x = transform.translation.x
+            y = transform.translation.y
+            q = transform.rotation
+            # Convert quaternion to Euler angle (Yaw)
+            siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+            yaw = math.atan2(siny_cosp, cosy_cosp)
+            # yaw = yaw + math.pi  # FIX: Rotate 180 degrees to match Isaac's forward direction
+            yaw = self.normalize_angle(yaw)  # Ensure yaw is within [-pi, pi])
+            self.initial_poses[agent_index] = (x, y, yaw)
+            # self.rvo_sim.setAgentPosition(self.agent_rvo_ids[agent_index], (x, y))  # FIX: set initial position in RVO2
+            self.get_logger().info(f'Agent {agent_index} initial position set to ({x:.2f}, {y:.2f}, {math.degrees(yaw):.1f}°)')
+
+    def calculate_goals(self):
+        for i in range(self.num_agents):
+            global_target_x, global_target_y = self.goals[i]
+            if i in self.initial_poses:
+                x_start, y_start, yaw_start = self.initial_poses[i]
+                
+                # 1. Calculate the straight-line global distance to the goal
+                dx = global_target_x - x_start
+                dy = global_target_y - y_start
+                
+                # 2. Transform this global distance into the car's local odometry frame
+                # using the inverse rotation matrix (rotating by -yaw_start)
+                local_goal_x = (dx * math.cos(yaw_start)) + (dy * math.sin(yaw_start))
+                local_goal_y = (-dx * math.sin(yaw_start)) + (dy * math.cos(yaw_start))
+                
+                # 3. Assign this calculated local goal to ORCA
+                self.goals[i] = (local_goal_x, local_goal_y)
+                
+                self.get_logger().info(
+                    f'Agent {i} Global ({global_target_x}, {global_target_y}) '
+                    f'-> Local Goal: ({local_goal_x:.2f}, {local_goal_y:.2f})'
+                )
+
     def calculate_vector_to_goal(self, agent_rvo_id, current_pos, goal_pos):
         dx = goal_pos[0] - current_pos[0]
         dy = goal_pos[1] - current_pos[1]
@@ -84,10 +134,15 @@ class SwarmControlNode(Node):
         return angle
 
     def control_loop(self):
-        if len(self.current_poses) < self.num_agents:
-            self.get_logger().warn(
-                f'Waiting for agents... {len(self.current_poses)}/{self.num_agents}')
+        if len(self.current_poses) < self.num_agents or len(self.initial_poses) < self.num_agents:
+            self.get_logger().warning(f'Waiting for all agents to report their positions...'
+                                      + f'{len(self.current_poses)}/{self.num_agents} odom,'
+                                      + f'{len(self.initial_poses)}/{self.num_agents} TF')
             return
+        
+        if not self.has_calculated_goals:
+            self.calculate_goals()
+            self.has_calculated_goals = True
 
         # 1. Update RVO2 with current positions and preferred velocities
         for i in range(self.num_agents):
