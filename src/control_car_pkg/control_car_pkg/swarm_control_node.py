@@ -19,7 +19,7 @@ class SwarmControlNode(Node):
         
         # 1. Initialize RVO2 Simulator
         # Params: timeStep, neighborDist, maxNeighbors, timeHorizon, timeHorizonObst, radius, maxSpeed
-        self.rvo_sim = rvo2.PyRVOSimulator(0.05, 5.0, 5, 2.0, 2.0, 0.5, 1.2)
+        self.rvo_sim = rvo2.PyRVOSimulator(0.05, 5.0, 5, 1.0, 2.0, 1.0, 1.2)
         
         self.agent_rvo_ids = []
         self.goals = [(10.0, 10.0)] * num_agents 
