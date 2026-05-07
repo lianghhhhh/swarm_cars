@@ -1,6 +1,5 @@
 import math
 import rvo2
-import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from tf2_msgs.msg import TFMessage
@@ -10,9 +9,7 @@ GOAL_THRESHOLD   = 0.3
 ANGULAR_GAIN     = 1.2        # softer gain to avoid saturation
 MAX_ANGULAR      = 1.5        # Isaac maxAngularSpeed
 MAX_LINEAR       = 1.2        # Isaac maxLinearSpeed
-# Blend linear speed down smoothly as angle error grows.
-# At >= this angle error, linear = 0. At 0 error, linear = full speed.
-ANGLE_SCALE      = math.pi / 3   # 60 degrees -> full stop linearly
+ANGLE_SCALE      = math.pi / 3   # reduce linear speed when angle difference exceeds 60 degrees
 
 
 class SwarmControlNode(Node):
@@ -32,8 +29,8 @@ class SwarmControlNode(Node):
         self.publishers_ = []
         self.odom_subscribers_ = []
         self.tf_subscribers_ = []
-        self.current_poses = {} # Store latest (x,y) from odometry
-        self.initial_poses = {} # Store initial (x,y) for each agent to set in RVO2
+        self.current_poses = {} # Store latest (x,y,yaw) from odometry
+        self.initial_poses = {} # Store initial global (x,y,yaw) for each agent to set in RVO2
         
         for i in range(self.num_agents):
             # Add agent to ORCA sim (initially at 0,0)
@@ -69,14 +66,14 @@ class SwarmControlNode(Node):
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
         yaw = math.atan2(siny_cosp, cosy_cosp)
-        yaw = yaw + math.pi  # FIX: Rotate 180 degrees to match Isaac's forward direction
+        yaw = yaw + math.pi  # Rotate 180 degrees to match Isaac's forward direction
         yaw = self.normalize_angle(yaw)  # Ensure yaw is within [-pi, pi]
         
         # Store x, y, and yaw
         self.current_poses[agent_index] = (x, y, yaw)
 
     def tf_callback(self, msg, agent_index):
-        # Extract position from TF (if needed for RVO2 initialization)
+        # Extract position from TF 
         if agent_index not in self.initial_poses and msg.transforms:
             transform = msg.transforms[0].transform
             x = transform.translation.x
@@ -86,10 +83,8 @@ class SwarmControlNode(Node):
             siny_cosp = 2 * (q.w * q.z + q.x * q.y)
             cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
             yaw = math.atan2(siny_cosp, cosy_cosp)
-            # yaw = yaw + math.pi  # FIX: Rotate 180 degrees to match Isaac's forward direction
             yaw = self.normalize_angle(yaw)  # Ensure yaw is within [-pi, pi])
             self.initial_poses[agent_index] = (x, y, yaw)
-            # self.rvo_sim.setAgentPosition(self.agent_rvo_ids[agent_index], (x, y))  # FIX: set initial position in RVO2
             self.get_logger().info(f'Agent {agent_index} initial position set to ({x:.2f}, {y:.2f}, {math.degrees(yaw):.1f}°)')
 
     def calculate_goals(self):
@@ -103,7 +98,6 @@ class SwarmControlNode(Node):
                 dy = global_target_y - y_start
                 
                 # 2. Transform this global distance into the car's local odometry frame
-                # using the inverse rotation matrix (rotating by -yaw_start)
                 local_goal_x = (dx * math.cos(yaw_start)) + (dy * math.sin(yaw_start))
                 local_goal_y = (-dx * math.sin(yaw_start)) + (dy * math.cos(yaw_start))
                 
@@ -121,7 +115,7 @@ class SwarmControlNode(Node):
         distance = math.sqrt(dx**2 + dy**2)
 
         if distance > GOAL_THRESHOLD:
-            max_speed = self.rvo_sim.getAgentMaxSpeed(agent_rvo_id)  # FIX: use correct agent
+            max_speed = self.rvo_sim.getAgentMaxSpeed(agent_rvo_id)
             return (dx / distance * max_speed, dy / distance * max_speed)
         else:
             return (0.0, 0.0)
@@ -146,12 +140,11 @@ class SwarmControlNode(Node):
 
         # 1. Update RVO2 with current positions and preferred velocities
         for i in range(self.num_agents):
-            pos_2d = self.current_poses[i][:2]  # FIX: strip yaw before passing to RVO2
+            pos_2d = self.current_poses[i][:2]  # strip yaw before passing to RVO2
 
             self.rvo_sim.setAgentPosition(self.agent_rvo_ids[i], pos_2d)
 
-            goal_vector = self.calculate_vector_to_goal(
-                self.agent_rvo_ids[i], pos_2d, self.goals[i])  # FIX: pass correct agent id
+            goal_vector = self.calculate_vector_to_goal(self.agent_rvo_ids[i], pos_2d, self.goals[i])
             self.rvo_sim.setAgentPrefVelocity(self.agent_rvo_ids[i], goal_vector)
 
         # 2. Step ORCA
@@ -181,11 +174,9 @@ class SwarmControlNode(Node):
             # Smoothly scale linear speed: full speed when aligned, zero when 60°+ off
             angle_ratio        = max(0.0, 1.0 - abs(angle_diff) / ANGLE_SCALE)
             blended_linear     = linear_speed * angle_ratio
-
-            # FIX 1: Negate linear.x because Isaac's vehicle forward axis is flipped
             twist_msg.linear.x  = blended_linear
 
-            # FIX 2: Clamp angular within Isaac's limit
+            # Clamp angular within Isaac's limit
             twist_msg.angular.z = max(-MAX_ANGULAR, min(MAX_ANGULAR, ANGULAR_GAIN * angle_diff))
 
             self.get_logger().debug(
