@@ -9,7 +9,7 @@ GOAL_THRESHOLD   = 0.3
 ANGULAR_GAIN     = 1.2        # softer gain to avoid saturation
 MAX_ANGULAR      = 1.5        # Isaac maxAngularSpeed
 MAX_LINEAR       = 1.2        # Isaac maxLinearSpeed
-ANGLE_SCALE      = math.pi / 3   # reduce linear speed when angle difference exceeds 60 degrees
+ANGLE_SCALE = math.pi / 4.0  # reduce linear speed when angle difference exceeds 60 degrees
 
 
 class SwarmControlNode(Node):
@@ -87,27 +87,67 @@ class SwarmControlNode(Node):
             self.initial_poses[agent_index] = (x, y, yaw)
             self.get_logger().info(f'Agent {agent_index} initial position set to ({x:.2f}, {y:.2f}, {math.degrees(yaw):.1f}°)')
 
+    # def calculate_goals(self):
+    #     for i in range(self.num_agents):
+    #         global_target_x, global_target_y = self.goals[i]
+    #         if i in self.initial_poses:
+    #             x_start, y_start, yaw_start = self.initial_poses[i]
+                
+    #             # 1. Calculate the straight-line global distance to the goal
+    #             dx = global_target_x - x_start
+    #             dy = global_target_y - y_start
+                
+    #             # 2. Transform this global distance into the car's local odometry frame
+    #             local_goal_x = (dx * math.cos(yaw_start)) + (dy * math.sin(yaw_start))
+    #             local_goal_y = (-dx * math.sin(yaw_start)) + (dy * math.cos(yaw_start))
+                
+    #             # 3. Assign this calculated local goal to ORCA
+    #             self.goals[i] = (local_goal_x, local_goal_y)
+                
+    #             self.get_logger().info(
+    #                 f'Agent {i} Global ({global_target_x}, {global_target_y}) '
+    #                 f'-> Local Goal: ({local_goal_x:.2f}, {local_goal_y:.2f})'
+    #             )
+
     def calculate_goals(self):
-        for i in range(self.num_agents):
-            global_target_x, global_target_y = self.goals[i]
-            if i in self.initial_poses:
-                x_start, y_start, yaw_start = self.initial_poses[i]
+        # Your single shared destination
+        center_goal_x = 10.0
+        center_goal_y = 10.0
+        
+        # How far apart they should wait (equivalent to SAME_GOAL_WAITING_RADIUS_FACTOR)
+        waiting_radius = 4.0 
+        
+        # Count how many cars actually have initial poses
+        active_agents = [i for i in range(self.num_agents) if i in self.initial_poses]
+        n = len(active_agents)
+        
+        if n == 0:
+            return
+
+        for idx, agent_index in enumerate(active_agents):
+            x_start, y_start, yaw_start = self.initial_poses[agent_index]
+
+            if idx == 0:
+                # Car 0 gets to go straight to the absolute center!
+                my_goal_x = center_goal_x
+                my_goal_y = center_goal_y
+            else:
+                # The rest of the cars form a waiting ring around the center
+                # Distribute them evenly along the circumference (2 * pi)
+                angle = (2.0 * math.pi * idx) / n
                 
-                # 1. Calculate the straight-line global distance to the goal
-                dx = global_target_x - x_start
-                dy = global_target_y - y_start
-                
-                # 2. Transform this global distance into the car's local odometry frame
-                local_goal_x = (dx * math.cos(yaw_start)) + (dy * math.sin(yaw_start))
-                local_goal_y = (-dx * math.sin(yaw_start)) + (dy * math.cos(yaw_start))
-                
-                # 3. Assign this calculated local goal to ORCA
-                self.goals[i] = (local_goal_x, local_goal_y)
-                
-                self.get_logger().info(
-                    f'Agent {i} Global ({global_target_x}, {global_target_y}) '
-                    f'-> Local Goal: ({local_goal_x:.2f}, {local_goal_y:.2f})'
-                )
+                my_goal_x = center_goal_x + (waiting_radius * math.cos(angle))
+                my_goal_y = center_goal_y + (waiting_radius * math.sin(angle))
+
+            # calculate the local goal in the car's odometry frame
+            dx = my_goal_x - x_start
+            dy = my_goal_y - y_start
+            local_goal_x = (dx * math.cos(yaw_start)) + (dy * math.sin(yaw_start))
+            local_goal_y = (-dx * math.sin(yaw_start)) + (dy * math.cos(yaw_start))
+            
+            self.goals[agent_index] = (local_goal_x, local_goal_y)
+            self.get_logger().info(f'Agent {agent_index} assigned to coordinate ({local_goal_x:.2f}, {local_goal_y:.2f})')
+
 
     def calculate_vector_to_goal(self, agent_rvo_id, current_pos, goal_pos):
         dx = goal_pos[0] - current_pos[0]
@@ -151,6 +191,7 @@ class SwarmControlNode(Node):
         self.rvo_sim.doStep()
 
         # 3. Publish safe velocities
+        reach_goal_num = 0
         for i in range(self.num_agents):
             twist_msg = Twist()
             pos_2d = self.current_poses[i][:2]
@@ -161,7 +202,8 @@ class SwarmControlNode(Node):
 
             if dist_to_goal < GOAL_THRESHOLD:
                 self.publishers_[i].publish(twist_msg)  # zero twist = stop
-                self.get_logger().info(f'Agent {i} reached goal!')
+                # self.get_logger().info(f'Agent {i} reached goal!')
+                reach_goal_num += 1
                 continue
 
             safe_velocity = self.rvo_sim.getAgentVelocity(self.agent_rvo_ids[i])
@@ -172,7 +214,7 @@ class SwarmControlNode(Node):
             angle_diff    = self.normalize_angle(desired_angle - current_angle)
 
             # Smoothly scale linear speed: full speed when aligned, zero when 60°+ off
-            angle_ratio        = max(0.0, 1.0 - abs(angle_diff) / ANGLE_SCALE)
+            angle_ratio = max(0.0, 1.0 - abs(angle_diff) / ANGLE_SCALE)
             blended_linear     = linear_speed * angle_ratio
             twist_msg.linear.x  = blended_linear
 
@@ -184,3 +226,6 @@ class SwarmControlNode(Node):
                 f'lin={twist_msg.linear.x:.3f}, ang={twist_msg.angular.z:.3f}')
 
             self.publishers_[i].publish(twist_msg)
+
+        if reach_goal_num > 0:
+            self.get_logger().info(f'{reach_goal_num}/{self.num_agents} agents have reached their goals.')
