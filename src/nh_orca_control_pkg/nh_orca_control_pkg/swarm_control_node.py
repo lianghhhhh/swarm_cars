@@ -7,12 +7,12 @@ from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import Twist
 
 GOAL_THRESHOLD   = 0.3
-MAX_ANGULAR      = 3.0        # Isaac maxAngularSpeed
+MAX_ANGULAR      = 1.5        # Isaac maxAngularSpeed
 MAX_LINEAR       = 1.2        # Isaac maxLinearSpeed
 
 # NH-ORCA Kinematic Configuration parameters (Matching your Turtlebot reference math)
-EFFECTIVE_D      = 0.10      # Shifting control point ahead of the non-holonomic axis
-WHEEL_L          = 0.235       # Track width / distance between wheels
+EFFECTIVE_D      = 0.175      # Shifting control point ahead of the non-holonomic axis
+WHEEL_L          = 0.23       # Track width / distance between wheels
 
 
 class SwarmControlNode(Node):
@@ -25,7 +25,7 @@ class SwarmControlNode(Node):
         # Note: radius assigned as (radius + effective_distance) as per the source defaults
         sim_radius = 0.3 + EFFECTIVE_D
         # Params: timeStep, neighborDist, maxNeighbors, timeHorizon, timeHorizonObst, radius, maxSpeed
-        self.rvo_sim = rvo2.PyRVOSimulator(0.05, 5.0, 5, 1.0, 2.0, sim_radius, MAX_LINEAR)
+        self.rvo_sim = rvo2.PyRVOSimulator(0.05, 15.0, 10, 1.0, 10.0, sim_radius, MAX_LINEAR)
         
         self.agent_rvo_ids = []
         self.goals = [(10.0, 10.0)] * num_agents 
@@ -181,20 +181,13 @@ class SwarmControlNode(Node):
 
             # Compute normalized trajectory vector to objective targets
             goal_x, goal_y = self.goals[i]
-            dist_to_goal = math.sqrt((goal_x - pos_x)**2 + (goal_y - pos_y)**2)
+            goal_vector = np.array([goal_x - eff_pos[0], goal_y - eff_pos[1]])
+            norm_dist = np.linalg.norm(goal_vector)
             
-            if dist_to_goal < GOAL_THRESHOLD:
-                # Tell RVO2 this agent is parked and will NOT help avoid collisions
-                self.rvo_sim.setAgentPrefVelocity(self.agent_rvo_ids[i], (0.0, 0.0))
-            else:
-                # Car is still driving, calculate trajectory vector
-                goal_vector = np.array([goal_x - eff_pos[0], goal_y - eff_pos[1]])
-                norm_dist = np.linalg.norm(goal_vector)
+            if norm_dist > 1.0:
+                goal_vector = goal_vector / norm_dist
                 
-                if norm_dist > 1.0:
-                    goal_vector = goal_vector / norm_dist
-                    
-                self.rvo_sim.setAgentPrefVelocity(self.agent_rvo_ids[i], tuple(MAX_LINEAR * goal_vector))
+            self.rvo_sim.setAgentPrefVelocity(self.agent_rvo_ids[i], tuple(MAX_LINEAR * goal_vector))
 
         # 2. Complete Simulation Cycle Step
         self.rvo_sim.doStep()
@@ -210,7 +203,7 @@ class SwarmControlNode(Node):
 
             # Stop conditions if within arrival radius configurations
             if dist_to_goal < GOAL_THRESHOLD:
-                self.publishers_[i].publish(Twist())  # Empty zeroed vector stop command
+                # self.publishers_[i].publish(Twist())  # Empty zeroed vector stop command
                 reach_goal_num += 1
                 continue
 
